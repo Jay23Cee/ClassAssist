@@ -1131,10 +1131,11 @@ function requestLoad(){
     loadDebounce = setTimeout(()=>load(), 220);
 }
 
-async function load(){
-    if(actionBusy) return;
+async function load(opts = {}){
+    const force = !!opts.force;
+    if(actionBusy && !force) return;
     const pause = document.getElementById("pauseRefresh");
-    if(pause && pause.checked) return;
+    if(pause && pause.checked && !force) return;
 
     let r, j;
     try{
@@ -1388,7 +1389,7 @@ async function doAction(ticketId, action){
     }
 
     // quick refresh
-    load();
+    await load({ force: true });
     return true;
 }
 
