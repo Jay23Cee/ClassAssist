@@ -1,0 +1,800 @@
+<!doctype html>
+<html>
+<head>
+<title>ClassAssist</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+    body{font-family:Arial;margin:20px;max-width:1100px}
+    .topbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+    .pill{display:inline-block;padding:6px 10px;border:1px solid #ddd;border-radius:999px;font-size:12px;background:#fafafa}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:10px 0 14px}
+    .controls label{font-size:12px;color:#444;display:block;margin-bottom:4px}
+    .controls input,.controls select{padding:8px;border:1px solid #ccc;border-radius:8px}
+    .controls .group{display:flex;flex-direction:column}
+    .card{border:1px solid #ccc;padding:12px;margin:8px 0;border-radius:10px}
+    .green{border-left:10px solid green}
+    .yellow{border-left:10px solid gold}
+    .red{border-left:10px solid red}
+    .blue{border-left:10px solid dodgerblue}
+    .muted{color:#666;font-size:12px}
+    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+    .btns{display:flex;gap:8px;flex-wrap:wrap}
+    button{padding:8px 10px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}
+    button:hover{background:#f6f6f6}
+    button.primary{border-color:#111}
+    button.danger{border-color:#b00020}
+    .details{margin-top:10px;padding:10px;background:#fafafa;border:1px solid #eee;border-radius:10px;display:none}
+    .flash{animation:flash 1.2s ease-in-out}
+    @keyframes flash{0%{transform:scale(1);box-shadow:0 0 0 rgba(0,0,0,0)}50%{transform:scale(1.01);box-shadow:0 10px 25px rgba(0,0,0,0.12)}100%{transform:scale(1);box-shadow:0 0 0 rgba(0,0,0,0)}}
+    .small{font-size:12px}
+    .right{margin-left:auto}
+
+    .sticky{position:sticky;top:0;z-index:1000;background:#fff;padding-top:4px}
+    .sticky:after{content:'';display:block;height:10px}
+
+    #board{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+    .col{flex:1;min-width:320px}
+    .colTitle{margin:6px 0 8px}
+    .toast{position:fixed;right:18px;bottom:18px;z-index:9999;
+           background:#111;color:#fff;padding:10px 12px;border-radius:10px;
+           box-shadow:0 6px 24px rgba(0,0,0,.25);display:none;font-size:13px}
+    .toast.ok{background:#0b7a2a}
+    .toast.err{background:#a60000}
+    #overlay{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:9998;
+             display:none;align-items:center;justify-content:center}
+    #overlay .box{background:#fff;border-radius:14px;padding:16px 18px;min-width:280px;
+                  box-shadow:0 10px 40px rgba(0,0,0,.25)}
+    .spinner{width:22px;height:22px;border-radius:50%;
+             border:3px solid #ddd;border-top-color:#111;animation:spin .9s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+</style>
+</head>
+<body>
+
+<h2>ClassAssist Dashboard</h2>
+
+<div class="sticky">
+<div class="topbar">
+    <span class="pill" id="metaPill">Loading…</span>
+    <span class="pill" id="refreshPill">Next refresh: --</span>
+    <span class="pill" id="statsPill">Stats: --</span>
+    <span class="pill" id="authPill" style="display:none"></span>
+</div>
+
+<div class="controls">
+    <div class="group">
+        <label>Search student</label>
+        <input id="q" placeholder="Type a name…" />
+    </div>
+
+    <div class="group">
+        <label>Period</label>
+        <select id="period">
+            <option value="">All</option>
+        </select>
+    </div>
+
+    <div class="group">
+        <label>Status</label>
+        <select id="status">
+            <option value="">All</option>
+            <option value="OPEN">OPEN</option>
+            <option value="IN_PROGRESS">IN_PROGRESS</option>
+        </select>
+    </div>
+
+    <div class="group">
+        <label>Help type</label>
+        <select id="helpType">
+            <option value="">All</option>
+        </select>
+    </div>
+
+    <div class="group">
+        <label>Sort</label>
+        <select id="sortMode">
+            <option value="queue">Smart queue</option>
+            <option value="wait">Longest wait</option>
+            <option value="newest">Newest</option>
+            <option value="period">Period</option>
+            <option value="status">Status</option>
+        </select>
+    </div>
+
+    <div class="group">
+        <label>Filters</label>
+        <button onclick="clearFilters()">Clear</button>
+        <div class="muted small">Reset search and dropdowns</div>
+    </div>
+
+    <div class="group">
+        <label>Refresh</label>
+        <div style="display:flex;gap:8px;align-items:center">
+            <button onclick="load()">Refresh now</button>
+            <label class="small"><input type="checkbox" id="pauseRefresh" /> Pause</label>
+        </div>
+        <div class="muted small">Pause stops auto refresh</div>
+    </div>
+
+    <div class="group">
+        <label>Next</label>
+        <button class="primary" onclick="suggestNext()">Suggest next</button>
+        <div class="muted small">Uses Smart queue</div>
+    </div>
+
+    <div class="group">
+        <label class="small">Alerts</label>
+        <div style="display:flex;gap:10px;align-items:center">
+            <label class="small"><input type="checkbox" id="sound" /> Sound</label>
+            <label class="small"><input type="checkbox" id="desktop" /> Desktop</label>
+            <label class="small"><input type="checkbox" id="highlight" checked /> Highlight</label>
+        </div>
+    </div>
+
+    <div class="group right">
+        <label>Teacher passcode</label>
+        <div style="display:flex;gap:8px;align-items:center">
+            <input id="token" placeholder="(only needed if enabled)" />
+            <button onclick="saveToken()">Save</button>
+        </div>
+        <div class="muted small" id="tokenHint"></div>
+    </div>
+</div>
+</div>
+
+
+<div id="board">
+    <div class="col">
+        <div class="muted small colTitle"><b>OPEN</b></div>
+        <div id="listOpen"></div>
+    </div>
+    <div class="col">
+        <div class="muted small colTitle"><b>IN PROGRESS</b></div>
+        <div id="listProgress"></div>
+    </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<div id="overlay">
+    <div class="box">
+        <div style="display:flex;gap:10px;align-items:center">
+            <div class="spinner"></div>
+            <div>
+                <div id="overlayText" style="font-weight:700">Saving…</div>
+                <div id="overlaySub" class="muted" style="margin-top:2px">Please wait. Do not click again.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<script>
+let POLL_MS = 30000;
+let nextLoadAt = 0;
+let countdownTimer = null;
+let pollTimer = null;
+
+let lastTicketIds = new Set();     // from previous refresh
+let lastRedIds = new Set();        // tickets that were red on previous refresh
+let newlyArrivedIds = new Set();
+let actionBusy = false;
+
+// Quick-tag notes (zero typing)
+const TAGS_PRIMARY = ["Small group","1 on 1","Reteach","Practice","Missing work","Follow up"]; 
+const TAGS_EXTRA = ["Vocab","Check understanding"]; 
+const selectedTagsByTicket = {}; // {ticketId: Set([...])}
+const customTagsByTicket = {};   // {ticketId: Set([...])}
+const otherEnabledByTicket = {}; // {ticketId: boolean}
+let lastSuggestedId = "";
+
+function showOverlay(text, sub){
+    const ov = document.getElementById("overlay");
+    const t = document.getElementById("overlayText");
+    const s = document.getElementById("overlaySub");
+    if(t) t.textContent = text || "Saving…";
+    if(s) s.textContent = sub || "Please wait. Do not click again.";
+    if(ov) ov.style.display = "flex";
+}
+function hideOverlay(){
+    const ov = document.getElementById("overlay");
+    if(ov) ov.style.display = "none";
+}
+function showToast(text, kind){
+    const el = document.getElementById("toast");
+    if(!el) return;
+    el.className = "toast" + (kind ? (" " + kind) : "");
+    el.textContent = text || "";
+    el.style.display = "block";
+    clearTimeout(el._t);
+    el._t = setTimeout(()=>{ el.style.display = "none"; }, 1600);
+}
+
+function lockCardButtons(btn){
+    const card = btn.closest(".card");
+    if(!card) return [];
+    const buttons = Array.from(card.querySelectorAll("button"));
+    for(const b of buttons){
+        b.disabled = true;
+        b.style.opacity = 0.6;
+        b.style.cursor = "not-allowed";
+    }
+    return buttons;
+}
+function unlockButtons(buttons){
+    for(const b of buttons){
+        b.disabled = false;
+        b.style.opacity = "";
+        b.style.cursor = "";
+    }
+}
+
+async function handleAction(btn, ticketId, action){
+    // Hard throttle: one action at a time, plus per-card lock.
+    if(actionBusy || btn.disabled) return;
+    actionBusy = true;
+
+    const originalText = btn.textContent;
+    btn.textContent = "Working…";
+    const locked = lockCardButtons(btn);
+
+    // Minimum overlay time so the user naturally slows down.
+    const minMs = 900;
+    const start = Date.now();
+    showOverlay("Saving…", "Please wait. Do not click again.");
+
+    try{
+        await doAction(ticketId, action);
+        showToast("Completed", "ok");
+    }catch(e){
+        // doAction already showed an error toast; keep message honest
+        if(String(e || "").includes("NOT_CONFIRMED")){
+            showToast("Not confirmed. Refresh and try again.", "err");
+        }
+    }finally{
+        const elapsed = Date.now() - start;
+        const wait = Math.max(0, minMs - elapsed);
+        setTimeout(()=>{
+            hideOverlay();
+            btn.textContent = originalText;
+            unlockButtons(locked);
+            actionBusy = false;
+        }, wait);
+    }
+}
+   // just for flashing on this render
+
+function buildTagHtml(ticketId){
+    const sel = selectedTagsByTicket[ticketId] || new Set();
+    const all = TAGS_PRIMARY.concat(TAGS_EXTRA);
+    return all.map(tag => {
+        const id = `tag_${ticketId.replace(/[^a-zA-Z0-9_]/g, "_")}_${tag.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+        const checked = sel.has(tag) ? "checked" : "";
+        const cls = TAGS_PRIMARY.includes(tag) ? "" : "muted";
+        return `<label class="small ${cls}" style="margin-right:10px;white-space:nowrap">`
+             + `<input type="checkbox" id="${id}" ${checked} onchange="toggleTag('${ticketId}','${tag}',this.checked)"/> ${escapeHtml(tag)}`
+             + `</label>`;
+    }).join("");
+}
+
+function toggleTag(ticketId, tag, isOn){
+    if(!selectedTagsByTicket[ticketId]) selectedTagsByTicket[ticketId] = new Set();
+    if(isOn) selectedTagsByTicket[ticketId].add(tag);
+    else selectedTagsByTicket[ticketId].delete(tag);
+}
+
+function toggleOther(ticketId, isOn){
+    otherEnabledByTicket[ticketId] = !!isOn;
+    const wrap = document.getElementById("otherWrap_" + safeId(ticketId));
+    if(wrap) wrap.style.display = isOn ? "inline-flex" : "none";
+}
+
+function addCustomTag(ticketId){
+    const sid = safeId(ticketId);
+    const input = document.getElementById("otherInput_" + sid);
+    if(!input) return;
+    const raw = (input.value || "").trim();
+    if(!raw) return;
+
+    if(!customTagsByTicket[ticketId]) customTagsByTicket[ticketId] = new Set();
+    customTagsByTicket[ticketId].add(raw);
+    input.value = "";
+
+    requestLoad();
+}
+
+function removeCustomTag(ticketId, tag){
+    const set = customTagsByTicket[ticketId];
+    if(!set) return;
+    set.delete(tag);
+    requestLoad();
+}
+
+function buildCustomTagHtml(ticketId){
+    const sid = safeId(ticketId);
+    const enabled = !!otherEnabledByTicket[ticketId];
+    const checked = enabled ? "checked" : "";
+    const set = customTagsByTicket[ticketId] || new Set();
+    const tags = Array.from(set);
+
+    let chips = "";
+    if(tags.length){
+        chips = `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">` +
+            tags.map(t => {
+                const et = escapeHtml(t);
+                return `<span style="border:1px solid #ddd;border-radius:999px;padding:4px 8px;background:#fafafa;cursor:pointer"
+                    title="Click to remove"
+                    onclick="removeCustomTag('${jsQuote(ticketId)}','${jsQuote(t)}')">${et} ✕</span>`;
+            }).join("") +
+        `</div>`;
+    }
+
+    const wrapStyle = enabled ? "display:inline-flex;gap:8px;align-items:center" : "display:none";
+    return `
+    <div class="small" style="margin-top:8px">
+        <label class="small" style="margin-right:10px;white-space:nowrap">
+            <input type="checkbox" ${checked} onchange="toggleOther('${jsQuote(ticketId)}',this.checked)"/> Other
+        </label>
+        <span id="otherWrap_${sid}" style="${wrapStyle}">
+            <input id="otherInput_${sid}" placeholder="Quick note/tag…"
+                style="padding:6px 8px;border:1px solid #ccc;border-radius:8px;width:220px"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addCustomTag('${jsQuote(ticketId)}');}" />
+            <button onclick="addCustomTag('${jsQuote(ticketId)}')">Add</button>
+        </span>
+        ${chips}
+    </div>`;
+}
+
+
+function escapeHtml(s){
+    return String(s ?? "").replace(/[&<>"']/g, m => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+    }[m]));
+}
+
+function jsQuote(s){
+    return String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+function safeId(s){
+    return String(s ?? "").replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+function minsLabel(waitSeconds){
+    if(waitSeconds === null || waitSeconds === undefined) return "--";
+    return String(Math.floor(waitSeconds / 60));
+}
+
+function getToken(){
+    return localStorage.getItem("classassist_token") || "";
+}
+
+function saveToken(){
+    const v = document.getElementById("token").value.trim();
+    localStorage.setItem("classassist_token", v);
+    load();
+    return true;
+}
+
+function clearFilters(){
+    document.getElementById("q").value = "";
+    document.getElementById("period").value = "";
+    document.getElementById("status").value = "";
+    document.getElementById("helpType").value = "";
+    document.getElementById("sortMode").value = "queue";
+    requestLoad();
+}
+
+
+function pingBeep(){
+    try{
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = "sine";
+        o.frequency.value = 880;
+        g.gain.value = 0.03;
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start();
+        setTimeout(()=>{ o.stop(); ctx.close(); }, 120);
+    }catch(e){}
+}
+
+async function maybeDesktopNotify(title, body){
+    if(!document.getElementById("desktop").checked) return;
+    if(!("Notification" in window)) return;
+
+    if(Notification.permission === "default"){
+        try{ await Notification.requestPermission(); }catch(e){}
+    }
+    if(Notification.permission !== "granted") return;
+
+    try{
+        new Notification(title, { body });
+    }catch(e){}
+}
+
+function buildOptions(selectEl, values){
+    const current = selectEl.value;
+    const opts = ['<option value="">All</option>']
+        .concat(values.filter(Boolean).sort().map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`));
+    selectEl.innerHTML = opts.join("");
+    selectEl.value = current;
+}
+
+function applyFiltersAndSort(tickets){
+    const q = document.getElementById("q").value.trim().toLowerCase();
+    const p = document.getElementById("period").value.trim();
+    const st = document.getElementById("status").value.trim();
+    const ht = document.getElementById("helpType").value.trim();
+    const sortMode = document.getElementById("sortMode").value;
+
+    let out = tickets.slice();
+
+    if(q){
+        out = out.filter(t => String(t.student||"").toLowerCase().includes(q));
+    }
+    if(p){
+        out = out.filter(t => String(t.period||"") === p);
+    }
+    if(st){
+        out = out.filter(t => String(t.status||"") === st);
+    }
+    if(ht){
+        out = out.filter(t => String(t.help_type||"") === ht);
+    }
+
+    if(sortMode === "queue"){
+        const rank = (s)=> s==="OPEN" ? 0 : 1;
+        const pnum = (p)=>{ const x = String(p||"").trim(); const n = parseInt(x,10); return Number.isFinite(n) ? n : 1e9; };
+        const wv = (w)=> (w===null||w===undefined) ? -1 : Number(w);
+        out.sort((a,b) => {
+            const ra = rank(String(a.status||"").toUpperCase());
+            const rb = rank(String(b.status||"").toUpperCase());
+            if(ra !== rb) return ra - rb;
+            const wa = wv(a.wait_seconds);
+            const wb = wv(b.wait_seconds);
+            if(wa !== wb) return wb - wa;
+            const pa = pnum(a.period);
+            const pb = pnum(b.period);
+            if(pa !== pb) return pa - pb;
+            return String(a.student||"").localeCompare(String(b.student||""));
+        });
+    }else if(sortMode === "wait"){
+        out.sort((a,b) => (b.wait_seconds ?? -1) - (a.wait_seconds ?? -1));
+    }else if(sortMode === "newest"){
+        out.sort((a,b) => {
+            const ta = Date.parse(a.timestamp || "") || 0;
+            const tb = Date.parse(b.timestamp || "") || 0;
+            return tb - ta;
+        });
+    }else if(sortMode === "period"){
+        out.sort((a,b) => String(a.period||"").localeCompare(String(b.period||"")));
+    }else if(sortMode === "status"){
+        const rank = (s)=> s==="OPEN" ? 0 : 1;
+        out.sort((a,b) => rank(a.status) - rank(b.status));
+    }
+
+    return out;
+}
+
+function scheduleTimers(){
+    if(pollTimer) clearInterval(pollTimer);
+    const pause = document.getElementById("pauseRefresh");
+    if(pause && pause.checked) return;
+    pollTimer = setInterval(load, POLL_MS);
+}
+
+function scheduleCountdown(){
+    if(countdownTimer) clearInterval(countdownTimer);
+    countdownTimer = setInterval(() => {
+        const pill = document.getElementById("refreshPill");
+        const pause = document.getElementById("pauseRefresh");
+        if(pause && pause.checked){
+            pill.textContent = "Next refresh: Paused";
+            return;
+        }
+        const diff = Math.max(0, Math.floor((nextLoadAt - Date.now()) / 1000));
+        pill.textContent = "Next refresh: " + diff + "s";
+    }, 250);
+}
+
+let loadDebounce = null;
+function requestLoad(){
+    clearTimeout(loadDebounce);
+    loadDebounce = setTimeout(()=>load(), 220);
+}
+
+async function load(opts = {}){
+    const force = !!opts.force;
+    if(actionBusy && !force) return;
+    const pause = document.getElementById("pauseRefresh");
+    if(pause && pause.checked && !force) return;
+
+    let r, j;
+    try{
+        r = await fetch("/api/tickets", { cache:"no-store" });
+        j = await r.json();
+    }catch(e){
+        const pill = document.getElementById("metaPill");
+        if(pill) pill.textContent = "Last OK: - | Error: " + String(e || "refresh_failed");
+        showToast("Refresh failed", "err");
+        return;
+    }
+
+    POLL_MS = (Number(j.poll_seconds) || 30) * 1000;
+    nextLoadAt = Date.now() + POLL_MS;
+
+    document.getElementById("token").value = getToken();
+
+    document.getElementById("metaPill").textContent =
+        "Last OK: " + (j.meta.last_ok || "-") + " | Error: " + (j.meta.last_error || "-");
+
+    // quick stats
+    const openCount = j.tickets.filter(t => t.status === "OPEN").length;
+    const progCount = j.tickets.filter(t => t.status === "IN_PROGRESS").length;
+    const waits = j.tickets.map(t => Number(t.wait_seconds)).filter(n => Number.isFinite(n) && n >= 0);
+    const avgMin = waits.length ? Math.round((waits.reduce((a,b)=>a+b,0)/waits.length)/60) : 0;
+    const maxMin = waits.length ? Math.floor((Math.max(...waits))/60) : 0;
+    document.getElementById("statsPill").textContent =
+        "Stats: OPEN " + openCount + " | IN PROGRESS " + progCount + " | Avg " + avgMin + "m | Max " + maxMin + "m";
+
+    const authPill = document.getElementById("authPill");
+    const tokenHint = document.getElementById("tokenHint");
+    if(j.auth_enabled){
+        authPill.style.display = "inline-block";
+        authPill.textContent = "Passcode: ON";
+        tokenHint.textContent = "Passcode required for Claim/Resolve/No-show/Reopen.";
+    }else{
+        authPill.style.display = "none";
+        tokenHint.textContent = "Passcode is OFF. Add teacher_passcode in config.json to enable.";
+    }
+
+    // build filter options from live data
+    const periods = Array.from(new Set(j.tickets.map(t => String(t.period||"").trim()).filter(Boolean)));
+    const helpTypes = Array.from(new Set(j.tickets.map(t => String(t.help_type||"").trim()).filter(Boolean)));
+    buildOptions(document.getElementById("period"), periods);
+    buildOptions(document.getElementById("helpType"), helpTypes);
+
+    // new ticket detection (compared to previous refresh)
+    const currentIds = new Set(j.tickets.map(t => t.ticket_id));
+    newlyArrivedIds = new Set();
+    for(const id of currentIds){
+        if(!lastTicketIds.has(id)) newlyArrivedIds.add(id);
+    }
+
+    // overdue detection (red OPEN tickets)
+    const currentRed = new Set(
+        j.tickets.filter(t => (t.wait_seconds ?? 0) >= 300 && t.status === "OPEN").map(t => t.ticket_id)
+    );
+    let newOverdueCount = 0;
+    for(const id of currentRed){
+        if(!lastRedIds.has(id)) newOverdueCount++;
+    }
+
+    const newCount = newlyArrivedIds.size;
+
+    if(newCount > 0){
+        if(document.getElementById("sound").checked) pingBeep();
+        await maybeDesktopNotify("New help ticket(s)", newCount + " new ticket(s) added.");
+    }
+    if(newOverdueCount > 0){
+        if(document.getElementById("sound").checked) pingBeep();
+        await maybeDesktopNotify("Overdue ticket(s)", newOverdueCount + " ticket(s) hit red.");
+    }
+
+    // render
+    render(applyFiltersAndSort(j.tickets));
+
+    // update baselines for next refresh
+    lastTicketIds = currentIds;
+    lastRedIds = currentRed;
+
+    scheduleTimers();
+    scheduleCountdown();
+}
+
+function render(tickets){
+    const listOpen = document.getElementById("listOpen");
+    const listProgress = document.getElementById("listProgress");
+    listOpen.innerHTML = "";
+    listProgress.innerHTML = "";
+
+    for(const t of tickets){
+        let cls = "green";
+        const ws = t.wait_seconds;
+
+        if(t.status === "IN_PROGRESS"){
+            cls = "blue";
+        }else if(ws !== null && ws !== undefined){
+            if(ws >= 300) cls = "red";
+            else if(ws >= 180) cls = "yellow";
+        }
+
+        const detailsId = "d_" + String(t.ticket_id).replace(/[^a-zA-Z0-9_]/g, "_");
+const helpType = escapeHtml(t.help_type || "--");
+        const ts = escapeHtml(t.timestamp || "--");
+        const claimedBy = escapeHtml(t.claimed_by || "--");
+        const claimedAt = escapeHtml(t.claimed_at || "--");
+
+        const waitMin = minsLabel(ws);
+        const status = escapeHtml(t.status || "OPEN");
+
+        const flash = (document.getElementById("highlight").checked && newlyArrivedIds.has(t.ticket_id))
+            ? "flash"
+            : "";
+
+        let tagsHtml = "";
+        if(t.status === "IN_PROGRESS"){
+            tagsHtml = `<div class="small" style="margin-top:6px">${buildTagHtml(t.ticket_id)}</div>` + buildCustomTagHtml(t.ticket_id);
+        }
+
+        let btns = "";
+        if(t.status === "OPEN"){
+            btns += `<button class="primary" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','claim')">Claim</button>`;
+            btns += `<button class="danger" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','no_show')">No-show</button>`;
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','resolve')">Resolve</button>`;
+        }else if(t.status === "IN_PROGRESS"){
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Back to OPEN</button>`;
+            btns += `<button class="danger" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','no_show')">No-show</button>`;
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','resolve')">Resolve</button>`;
+        }else{
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Back to OPEN</button>`;
+        }
+
+        const target = (t.status === "IN_PROGRESS") ? listProgress : listOpen;
+        target.innerHTML += `
+        <div class="card ${cls} ${flash}" id="card_${String(t.ticket_id).replace(/[^a-zA-Z0-9_]/g, "_")}">
+            <div class="row">
+                <div>
+                    <div><b>${escapeHtml(t.student)}</b> <span class="muted">(${status})</span></div>
+                    <div class="muted">Wait: ${waitMin} min | Period: ${escapeHtml(t.period)}</div>
+                    ${tagsHtml}
+                </div>
+                <div class="btns">
+                    ${btns}
+                    <button onclick="toggleDetails('${detailsId}')">Details</button>
+                </div>
+            </div>
+
+            <div class="details" id="${detailsId}">
+<div><b>Help Type:</b> ${helpType}</div>
+                <div><b>Submitted:</b> ${ts}</div>
+                <div><b>Claimed By:</b> ${claimedBy}</div>
+                <div><b>Claimed At:</b> ${claimedAt}</div>
+                <div class="muted small">Ticket ID: ${escapeHtml(t.ticket_id)}</div>
+            </div>
+        </div>`;
+    }
+
+    if(tickets.length === 0){
+        listOpen.innerHTML = `<div class="muted">No tickets match your filters.</div>`;
+        listProgress.innerHTML = ``;
+        return;
+    }
+
+    if(listOpen.innerHTML.trim() === ""){
+        listOpen.innerHTML = `<div class="muted">No OPEN tickets match your filters.</div>`;
+    }
+    if(listProgress.innerHTML.trim() === ""){
+        listProgress.innerHTML = `<div class="muted">No IN_PROGRESS tickets match your filters.</div>`;
+    }
+}
+
+function toggleDetails(id){
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.style.display = (el.style.display === "block") ? "none" : "block";
+}
+
+
+async function suggestNext(){
+    // Use current period/helpType/status filters to suggest a ticket
+    const period = document.getElementById("period").value.trim();
+    const helpType = document.getElementById("helpType").value.trim();
+    const status = document.getElementById("status").value.trim() || "OPEN";
+
+    const qs = new URLSearchParams();
+    if(period) qs.set("period", period);
+    if(helpType) qs.set("help_type", helpType);
+    if(status) qs.set("status", status);
+
+    const r = await fetch("/api/suggest?" + qs.toString(), { cache:"no-store" });
+    const j = await r.json();
+    if(!j.ticket){
+        alert("No matching tickets to suggest.");
+        return;
+    }
+
+    const id = String(j.ticket.ticket_id || "");
+    lastSuggestedId = id;
+    showToast("Suggested: " + (j.ticket.student || "Student"), "ok");
+    const card = document.getElementById("card_" + id.replace(/[^a-zA-Z0-9_]/g, "_"));
+    if(card){
+        card.classList.add("flash");
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(()=>card.classList.remove("flash"), 1400);
+    }else{
+        alert("Suggested: " + (j.ticket.student || "Student") + " (Ticket " + id + ")");
+    }
+}
+
+async function doAction(ticketId, action){
+    const token = getToken();
+    const payload = { ticket_id: ticketId, action: action };
+
+    // Only attach tags/notes when resolving (keeps Claim fast + avoids slowing you down).
+    if(String(action).toLowerCase() === "resolve"){
+        const parts = [];
+        const sel = selectedTagsByTicket[ticketId];
+        if(sel && sel.size) parts.push(...Array.from(sel));
+
+        const custom = customTagsByTicket[ticketId];
+        if(custom && custom.size) parts.push(...Array.from(custom));
+
+        if(parts.length){
+            payload.tags = parts.join(", ");
+        }
+    }
+
+    const headers = { "Content-Type":"application/json" };
+    if(token) headers["X-Auth-Token"] = token;
+
+    const r = await fetch("/api/action", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload)
+    });
+
+    if(r.status === 401){
+        showToast("Unauthorized. Check passcode.", "err");
+        throw new Error("UNAUTHORIZED");
+    }
+
+    const j = await r.json();
+    if(!j.ok){
+        const msg = (j.message || "UNKNOWN");
+        if(msg === "NOT_CONFIRMED" || String(msg).startsWith("VERIFY_")){
+            showToast("Not confirmed. Refresh and try again.", "err");
+            throw new Error("NOT_CONFIRMED");
+        }
+        showToast("Not saved: " + msg, "err");
+        throw new Error(msg);
+    }
+
+    // quick refresh
+    await load({ force: true });
+    return true;
+}
+
+// reload when filters change (debounced so typing doesn't spam the server)
+["q","period","status","helpType","sortMode"].forEach(id => {
+    document.getElementById(id).addEventListener("input", () => requestLoad());
+    document.getElementById(id).addEventListener("change", () => requestLoad());
+});
+
+document.getElementById("pauseRefresh").addEventListener("change", () => {
+    // If unpausing, refresh immediately.
+    if(!document.getElementById("pauseRefresh").checked){
+        load();
+    }
+    scheduleTimers();
+});
+
+
+function onGlobalKey(e){
+    const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+    if(tag === "input" || tag === "select" || tag === "textarea") return;
+    const k = String(e.key||"").toLowerCase();
+    if(k === "n"){ suggestNext(); }
+    if(!lastSuggestedId) return;
+    if(k === "c"){ doAction(lastSuggestedId, "claim"); }
+    if(k === "r"){ doAction(lastSuggestedId, "resolve"); }
+}
+document.addEventListener("keydown", onGlobalKey);
+
+load();
+</script>
+</body>
+</html>
