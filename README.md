@@ -1,116 +1,76 @@
-# ClassAssist
+ClassAssist
 
-ClassAssist is a lightweight Flask dashboard for managing live student help tickets backed by Google Sheets.
+ClassAssist is a lightweight Flask dashboard designed to manage live student help requests submitted through a Google Form and stored in Google Sheets. It provides teachers with a clear, fair, and structured way to respond to students who need assistance, ensuring support is given in order rather than based on who calls out first.
 
-If you're coming from the **WillingWorkers** project style, this follows the same practical pattern: simple UI, sheet-backed data, and fast teacher workflows.
+Purpose
 
-## What it does
-- Polls a Google Sheet on an interval.
-- Shows active tickets (`OPEN`, `IN_PROGRESS`) in a classroom dashboard.
-- Lets a teacher claim, reopen, resolve, or mark no-show.
-- Supports optional passcode protection for write actions.
-- Suggests the next ticket using a wait-time-first queue.
+In active classrooms, several students may request help at the same time. Without an organized system, it becomes difficult to track who asked first, who is currently being helped, and who still needs assistance. ClassAssist solves this problem by organizing requests into a live queue that prioritizes students based on wait time. This creates fairness, consistency, and efficiency during instruction.
 
-## Tech stack
-- Python 3 + Flask
-- Google Sheets API (`google-api-python-client`)
-- Plain HTML/CSS/JS frontend (no build step)
+Core Functionality
 
-## Project structure
-- `app.py` – Flask app and API routes.
-- `poller.py` – sheet polling, queueing, action updates.
-- `google_sheets.py` – authenticated Sheets client.
-- `config.py` – app paths + config loading.
-- `templates/dashboard.html` – dashboard UI.
+ClassAssist connects directly to a Google Sheet and performs the following functions:
 
-## Prerequisites
-- Python 3.10+ recommended
-- A Google Cloud service account with access to your spreadsheet
-- A spreadsheet tab with expected ticket columns (see below)
+Polls the sheet on a set interval
+Displays active tickets marked OPEN or IN_PROGRESS
+Allows the teacher to claim, resolve, reopen, or mark a request as no show
+Supports optional passcode protection for write actions
+Suggests the next student to help using a wait time first system
 
-## Setup
-1. **Clone and enter the project**
-   ```bash
-   git clone <your-repo-url>
-   cd ClassAssist
-   ```
+Technology Stack
 
+Python 3 with Flask
+Google Sheets API using google api python client
+Plain HTML, CSS, and JavaScript frontend with no build step
 
-2. **Create virtual environment and install dependencies**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+Project Structure
 
-   j
-   ```
+app.py handles the Flask server and API routes
+poller.py manages sheet polling, queue logic, and updates
+google_sheets.py manages authenticated Google Sheets access
+config.py loads configuration and paths
+templates/dashboard.html contains the dashboard interface
 
-3. **Add service account credentials**
-   - Place your service account JSON at:
-     - `secrets/service_account.json`
+Requirements
 
-4. **Create `config.json` in repo root**
-   ```json
-   {
-     "sheet_id": "YOUR_SPREADSHEET_ID",
-     "worksheet_name": "Form Responses 1",
-     "poll_seconds": 30,
-     "teacher_name": "Ms. Rivera",
-     "teacher_passcode": "optional-passcode",
-     "port": 5000
-   }
-   ```
+Python version 3.10 or higher is recommended
+A Google Cloud service account with permission to access the spreadsheet
+A spreadsheet tab that contains the required ticket columns
 
-## Expected sheet columns
-ClassAssist reads and/or writes these headers (case/spacing normalized):
+Setup
 
-- Core read fields:
-  - `Student`
-  - `Period`
-  - `Status`
-  - `TicketId`
-  - `Timestamp`
-  - `Help Type`
-  - `ClaimedBy`
-  - `ClaimedAt`
+Clone the repository and enter the project folder.
+Create a virtual environment and install dependencies from requirements.txt.
+Place your Google service account JSON file in the secrets folder under the name service_account.json.
+Create a config.json file in the root of the project that includes your spreadsheet ID, worksheet name, polling interval, teacher name, optional passcode, and port number.
 
-- Action/update fields (used when applying actions):
-  - `LastUpdated`
-  - `NoShowAt`, `NoShowBy`
-  - `ResolvedAt`, `ResolvedBy`
-  - `TeacherTags`, `TagsAt`
-  - `FollowUp`, `FollowUpAt`
+Expected Spreadsheet Columns
 
-## Run locally
-```bash
-python app.py
-```
+The application reads and writes spreadsheet headers regardless of capitalization or spacing.
 
-Then open:
-- `http://127.0.0.1:5000`
+Core read fields include Student, Period, Status, TicketId, Timestamp, Help Type, ClaimedBy, and ClaimedAt.
 
-## API overview
-- `GET /api/tickets` – current tickets + metadata.
-- `POST /api/action` – mutate ticket state.
-  - actions: `claim`, `reopen`, `resolve`, `no_show`
-- `GET /api/suggest` – suggest next ticket (filters optional).
+Update fields used during actions include LastUpdated, NoShowAt, NoShowBy, ResolvedAt, ResolvedBy, TeacherTags, TagsAt, FollowUp, and FollowUpAt.
 
-## Auth behavior
-- If `teacher_passcode` (or `admin_token`) is set in config, write routes require a matching token.
-- Token is accepted in:
-  - `X-Auth-Token` header,
-  - query param `token`, or
-  - JSON body field `token`.
+Running the Application
 
-## Troubleshooting
-- **`Missing config.json`**: add `config.json` in project root.
-- **`Missing service_account.json`**: create `secrets/service_account.json`.
-- **No tickets shown**:
-  - verify sheet ID + worksheet name,
-  - ensure service account has access,
-  - verify required headers exist.
+Start the server by running the main application file. After launch, open the local browser address that points to the configured port to view the dashboard.
 
-## Notes
-- Auto-refresh can be paused from the dashboard.
-- Queue prioritizes longest waiting tickets.
-- Only `OPEN` and `IN_PROGRESS` are displayed in the board.
+API Overview
+
+The system includes endpoints that return ticket data, update ticket states, and suggest the next student to help. Supported actions include claim, reopen, resolve, and no_show.
+
+Authentication Behavior
+
+If a teacher passcode or admin token is configured, write actions require a matching token. Tokens can be provided through request headers, query parameters, or JSON body fields.
+
+Troubleshooting
+
+If config.json is missing, create it in the project root.
+If service_account.json is missing, add it to the secrets folder.
+If no tickets appear, confirm the spreadsheet ID and worksheet name are correct, verify the service account has permission to access the sheet, and ensure the required headers exist.
+
+Notes
+
+Auto refresh can be paused directly from the dashboard.
+The queue prioritizes students who have been waiting the longest.
+Only OPEN and IN_PROGRESS tickets are displayed to keep the interface focused and uncluttered.
