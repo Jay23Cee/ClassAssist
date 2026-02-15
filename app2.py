@@ -5,8 +5,10 @@ import threading
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+import ssl
 
 from flask import Flask, jsonify, request, abort
+from werkzeug.exceptions import HTTPException
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -145,6 +147,7 @@ class SheetPoller:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._service = None
+        self._write_lock = threading.Lock()  # serialize sheet writes
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -177,11 +180,32 @@ class SheetPoller:
 
     # -------------------------
 
+    def _safe_execute(self, request_obj, retries=2):
+        """Execute a Google API request with a small retry on SSL handshake failures.
+
+        This protects the app from occasional TLS/proxy hiccups that would otherwise crash an action.
+        """
+        last = None
+        for attempt in range(int(retries)):
+            try:
+                return request_obj.execute()
+            except ssl.SSLError as e:
+                last = e
+                logger.exception("SSL error during Google Sheets call (attempt %s/%s)", attempt + 1, retries)
+                try:
+                    # Rebuild the service (fresh connection) and retry.
+                    self._service = build_sheets_service()
+                except Exception:
+                    pass
+                time.sleep(0.4 * (attempt + 1))
+        # If we still fail, bubble up so caller can report NOT_CONFIRMED / meta error.
+        raise last
+
     def _read_sheet(self):
-        result = self._service.spreadsheets().values().get(
+        result = self._safe_execute(self._service.spreadsheets().values().get(
             spreadsheetId=self.sheet_id,
             range=f"{self.sheet_name}!A1:ZZ"
-        ).execute()
+        ))
 
         values = result.get("values", [])
         if len(values) < 2:
@@ -219,7 +243,7 @@ class SheetPoller:
             if not ticket_id:
                 ticket_id = f"ROW_{row_num}"
 
-            key = (student.upper(), period.upper())
+            key = (student.upper(),)
             if key in seen:
                 continue
             seen.add(key)
@@ -257,10 +281,10 @@ class SheetPoller:
     # -------------------------
 
     def _get_sheet_data_and_cols(self):
-        data = self._service.spreadsheets().values().get(
+        data = self._safe_execute(self._service.spreadsheets().values().get(
             spreadsheetId=self.sheet_id,
             range=f"{self.sheet_name}!A1:ZZ"
-        ).execute().get("values", [])
+        )).get("values", [])
 
         if len(data) < 2:
             return None, None
@@ -271,16 +295,17 @@ class SheetPoller:
     def _batch_update_cells(self, row_index_1based, col_map, updates_dict):
         """Write a batch of cell updates AND verify the write.
 
-        This prevents the UI from ever showing "Completed" unless the sheet reflects
-        the change. If verification cannot be performed (network/proxy issue), we
-        return a NOT_CONFIRMED error so the UI can be honest.
+        Returns (ok, msg). msg can be:
+          - OK
+          - NO_VALID_COLUMNS (nothing to write because columns missing)
+          - NOT_CONFIRMED (write may have happened, but we could not verify)
         """
         body = {"valueInputOption": "RAW", "data": []}
 
-        # Build batch update ranges
-        for col_name, val in updates_dict.items():
-            if col_name not in col_map:
-                continue  # optional column missing
+        # Build batch update ranges (skip optional columns that don't exist)
+        updates = {k: v for k, v in (updates_dict or {}).items() if k in col_map}
+
+        for col_name, val in updates.items():
             cell = f"{col_to_letter(col_map[col_name])}{row_index_1based}"
             body["data"].append({
                 "range": f"{self.sheet_name}!{cell}",
@@ -290,46 +315,42 @@ class SheetPoller:
         if not body["data"]:
             return False, "NO_VALID_COLUMNS"
 
-        # 1) Write
-        self._service.spreadsheets().values().batchUpdate(
-            spreadsheetId=self.sheet_id,
-            body=body
-        ).execute()
-
-        # 2) Verify (read row back and confirm updated cells match expected values)
-        try:
-            row_vals = self._service.spreadsheets().values().get(
+        # Serialize writes (protects against rapid repeat actions)
+        with self._write_lock:
+            # 1) Write
+            self._safe_execute(self._service.spreadsheets().values().batchUpdate(
                 spreadsheetId=self.sheet_id,
-                range=f"{self.sheet_name}!A{row_index_1based}:ZZ{row_index_1based}"
-            ).execute().get("values", [])
+                body=body
+            ))
 
-            if not row_vals:
+            # 2) Verify
+            try:
+                row_vals = self._safe_execute(self._service.spreadsheets().values().get(
+                    spreadsheetId=self.sheet_id,
+                    range=f"{self.sheet_name}!A{row_index_1based}:ZZ{row_index_1based}"
+                )).get("values", [])
+
+                if not row_vals:
+                    return False, "NOT_CONFIRMED"
+
+                row = row_vals[0]
+
+                def read_cell(col_name):
+                    idx_1 = col_map.get(col_name)
+                    if not idx_1:
+                        return ""
+                    i0 = idx_1 - 1
+                    return normalize(row[i0]) if i0 < len(row) else ""
+
+                for k, v in updates.items():
+                    if read_cell(k) != normalize(v):
+                        return False, "NOT_CONFIRMED"
+
+            except Exception:
+                logger.exception("Verify error")
                 return False, "NOT_CONFIRMED"
 
-            row = row_vals[0]
-
-            def read_cell(col_name):
-                idx_1 = col_map.get(col_name)
-                if not idx_1:
-                    return None
-                i0 = idx_1 - 1
-                if i0 >= len(row):
-                    return ""
-                return str(row[i0]).strip()
-
-            for col_name, expected in updates_dict.items():
-                if col_name not in col_map:
-                    continue
-                got = read_cell(col_name)
-                exp = str(expected).strip()
-                if got != exp:
-                    return False, f"VERIFY_MISMATCH_{col_name}"
-
-            return True, "OK"
-
-        except Exception:
-            logger.exception("Verify error")
-            return False, "NOT_CONFIRMED"
+        return True, "OK"
 
     def _update_cache_ticket(self, ticket_id, patch):
         with self._lock:
@@ -351,7 +372,7 @@ class SheetPoller:
 
     # -------------------------
 
-    def apply_action(self, ticket_id, action):
+    def apply_action(self, ticket_id, action, tags=""):
         action = normalize(action).lower()
         ticket_id = normalize(ticket_id)
 
@@ -434,6 +455,13 @@ class SheetPoller:
                 "ResolvedBy": self.teacher,
                 "LastUpdated": now,
             }
+            t = normalize(tags)
+            if t:
+                updates["TeacherTags"] = t
+                updates["TagsAt"] = now
+                if "follow up" in t.lower():
+                    updates["FollowUp"] = "YES"
+                    updates["FollowUpAt"] = now
             ok, msg = self._batch_update_cells(target_row_1based, col, updates)
             if ok:
                 self._update_cache_ticket(ticket_id, {"status": "RESOLVED"})
@@ -514,6 +542,28 @@ def no_cache(resp):
     return resp
 
 
+
+@app.errorhandler(401)
+def err_401(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "message": "UNAUTHORIZED"}), 401
+    return "UNAUTHORIZED", 401
+
+
+@app.errorhandler(404)
+def err_404(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "message": "NOT_FOUND"}), 404
+    return "NOT_FOUND", 404
+
+
+@app.errorhandler(500)
+def err_500(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "message": "SERVER_ERROR"}), 500
+    return "SERVER_ERROR", 500
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
@@ -533,12 +583,20 @@ def api_tickets():
 
 @app.route("/api/action", methods=["POST"])
 def api_action():
-    require_write_auth()
-    data = request.get_json(force=True, silent=True) or {}
-    ticket_id = data.get("ticket_id", "")
-    action = data.get("action", "")
-    ok, msg = POLLER.apply_action(ticket_id, action)
-    return jsonify({"ok": ok, "message": msg})
+    try:
+        require_write_auth()
+        data = request.get_json(force=True, silent=True) or {}
+        ticket_id = data.get("ticket_id", "")
+        action = data.get("action", "")
+        tags = data.get("tags", "")
+        ok, msg = POLLER.apply_action(ticket_id, action, tags=tags)
+        return jsonify({"ok": ok, "message": msg})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("api_action error")
+        return jsonify({"ok": False, "message": "SERVER_ERROR"}), 500
+
 
 
 @app.route("/api/suggest")
@@ -593,6 +651,9 @@ DASHBOARD_HTML = r"""
     .small{font-size:12px}
     .right{margin-left:auto}
 
+    .sticky{position:sticky;top:0;z-index:1000;background:#fff;padding-top:4px}
+    .sticky:after{content:'';display:block;height:10px}
+
     #board{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
     .col{flex:1;min-width:320px}
     .colTitle{margin:6px 0 8px}
@@ -615,9 +676,11 @@ DASHBOARD_HTML = r"""
 
 <h2>ClassAssist Dashboard</h2>
 
+<div class="sticky">
 <div class="topbar">
     <span class="pill" id="metaPill">Loading…</span>
     <span class="pill" id="refreshPill">Next refresh: --</span>
+    <span class="pill" id="statsPill">Stats: --</span>
     <span class="pill" id="authPill" style="display:none"></span>
 </div>
 
@@ -662,6 +725,21 @@ DASHBOARD_HTML = r"""
     </div>
 
     <div class="group">
+        <label>Filters</label>
+        <button onclick="clearFilters()">Clear</button>
+        <div class="muted small">Reset search and dropdowns</div>
+    </div>
+
+    <div class="group">
+        <label>Refresh</label>
+        <div style="display:flex;gap:8px;align-items:center">
+            <button onclick="load()">Refresh now</button>
+            <label class="small"><input type="checkbox" id="pauseRefresh" /> Pause</label>
+        </div>
+        <div class="muted small">Pause stops auto refresh</div>
+    </div>
+
+    <div class="group">
         <label>Next</label>
         <button class="primary" onclick="suggestNext()">Suggest next</button>
         <div class="muted small">Uses Smart queue</div>
@@ -684,6 +762,7 @@ DASHBOARD_HTML = r"""
         </div>
         <div class="muted small" id="tokenHint"></div>
     </div>
+</div>
 </div>
 
 
@@ -723,6 +802,14 @@ let lastTicketIds = new Set();     // from previous refresh
 let lastRedIds = new Set();        // tickets that were red on previous refresh
 let newlyArrivedIds = new Set();
 let actionBusy = false;
+
+// Quick-tag notes (zero typing)
+const TAGS_PRIMARY = ["Small group","1 on 1","Reteach","Practice","Missing work","Follow up"]; 
+const TAGS_EXTRA = ["Vocab","Check understanding"]; 
+const selectedTagsByTicket = {}; // {ticketId: Set([...])}
+const customTagsByTicket = {};   // {ticketId: Set([...])}
+const otherEnabledByTicket = {}; // {ticketId: boolean}
+let lastSuggestedId = "";
 
 function showOverlay(text, sub){
     const ov = document.getElementById("overlay");
@@ -800,10 +887,99 @@ async function handleAction(btn, ticketId, action){
 }
    // just for flashing on this render
 
+function buildTagHtml(ticketId){
+    const sel = selectedTagsByTicket[ticketId] || new Set();
+    const all = TAGS_PRIMARY.concat(TAGS_EXTRA);
+    return all.map(tag => {
+        const id = `tag_${ticketId.replace(/[^a-zA-Z0-9_]/g, "_")}_${tag.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+        const checked = sel.has(tag) ? "checked" : "";
+        const cls = TAGS_PRIMARY.includes(tag) ? "" : "muted";
+        return `<label class="small ${cls}" style="margin-right:10px;white-space:nowrap">`
+             + `<input type="checkbox" id="${id}" ${checked} onchange="toggleTag('${ticketId}','${tag}',this.checked)"/> ${escapeHtml(tag)}`
+             + `</label>`;
+    }).join("");
+}
+
+function toggleTag(ticketId, tag, isOn){
+    if(!selectedTagsByTicket[ticketId]) selectedTagsByTicket[ticketId] = new Set();
+    if(isOn) selectedTagsByTicket[ticketId].add(tag);
+    else selectedTagsByTicket[ticketId].delete(tag);
+}
+
+function toggleOther(ticketId, isOn){
+    otherEnabledByTicket[ticketId] = !!isOn;
+    const wrap = document.getElementById("otherWrap_" + safeId(ticketId));
+    if(wrap) wrap.style.display = isOn ? "inline-flex" : "none";
+}
+
+function addCustomTag(ticketId){
+    const sid = safeId(ticketId);
+    const input = document.getElementById("otherInput_" + sid);
+    if(!input) return;
+    const raw = (input.value || "").trim();
+    if(!raw) return;
+
+    if(!customTagsByTicket[ticketId]) customTagsByTicket[ticketId] = new Set();
+    customTagsByTicket[ticketId].add(raw);
+    input.value = "";
+
+    requestLoad();
+}
+
+function removeCustomTag(ticketId, tag){
+    const set = customTagsByTicket[ticketId];
+    if(!set) return;
+    set.delete(tag);
+    requestLoad();
+}
+
+function buildCustomTagHtml(ticketId){
+    const sid = safeId(ticketId);
+    const enabled = !!otherEnabledByTicket[ticketId];
+    const checked = enabled ? "checked" : "";
+    const set = customTagsByTicket[ticketId] || new Set();
+    const tags = Array.from(set);
+
+    let chips = "";
+    if(tags.length){
+        chips = `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">` +
+            tags.map(t => {
+                const et = escapeHtml(t);
+                return `<span style="border:1px solid #ddd;border-radius:999px;padding:4px 8px;background:#fafafa;cursor:pointer"
+                    title="Click to remove"
+                    onclick="removeCustomTag('${jsQuote(ticketId)}','${jsQuote(t)}')">${et} ✕</span>`;
+            }).join("") +
+        `</div>`;
+    }
+
+    const wrapStyle = enabled ? "display:inline-flex;gap:8px;align-items:center" : "display:none";
+    return `
+    <div class="small" style="margin-top:8px">
+        <label class="small" style="margin-right:10px;white-space:nowrap">
+            <input type="checkbox" ${checked} onchange="toggleOther('${jsQuote(ticketId)}',this.checked)"/> Other
+        </label>
+        <span id="otherWrap_${sid}" style="${wrapStyle}">
+            <input id="otherInput_${sid}" placeholder="Quick note/tag…"
+                style="padding:6px 8px;border:1px solid #ccc;border-radius:8px;width:220px"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addCustomTag('${jsQuote(ticketId)}');}" />
+            <button onclick="addCustomTag('${jsQuote(ticketId)}')">Add</button>
+        </span>
+        ${chips}
+    </div>`;
+}
+
+
 function escapeHtml(s){
     return String(s ?? "").replace(/[&<>"']/g, m => ({
         "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
     }[m]));
+}
+
+function jsQuote(s){
+    return String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+function safeId(s){
+    return String(s ?? "").replace(/[^a-zA-Z0-9_]/g, "_");
 }
 
 function minsLabel(waitSeconds){
@@ -821,6 +997,16 @@ function saveToken(){
     load();
     return true;
 }
+
+function clearFilters(){
+    document.getElementById("q").value = "";
+    document.getElementById("period").value = "";
+    document.getElementById("status").value = "";
+    document.getElementById("helpType").value = "";
+    document.getElementById("sortMode").value = "queue";
+    requestLoad();
+}
+
 
 function pingBeep(){
     try{
@@ -917,6 +1103,8 @@ function applyFiltersAndSort(tickets){
 
 function scheduleTimers(){
     if(pollTimer) clearInterval(pollTimer);
+    const pause = document.getElementById("pauseRefresh");
+    if(pause && pause.checked) return;
     pollTimer = setInterval(load, POLL_MS);
 }
 
@@ -924,14 +1112,37 @@ function scheduleCountdown(){
     if(countdownTimer) clearInterval(countdownTimer);
     countdownTimer = setInterval(() => {
         const pill = document.getElementById("refreshPill");
+        const pause = document.getElementById("pauseRefresh");
+        if(pause && pause.checked){
+            pill.textContent = "Next refresh: Paused";
+            return;
+        }
         const diff = Math.max(0, Math.floor((nextLoadAt - Date.now()) / 1000));
         pill.textContent = "Next refresh: " + diff + "s";
     }, 250);
 }
 
+let loadDebounce = null;
+function requestLoad(){
+    clearTimeout(loadDebounce);
+    loadDebounce = setTimeout(()=>load(), 220);
+}
+
 async function load(){
-    const r = await fetch("/api/tickets", { cache:"no-store" });
-    const j = await r.json();
+    if(actionBusy) return;
+    const pause = document.getElementById("pauseRefresh");
+    if(pause && pause.checked) return;
+
+    let r, j;
+    try{
+        r = await fetch("/api/tickets", { cache:"no-store" });
+        j = await r.json();
+    }catch(e){
+        const pill = document.getElementById("metaPill");
+        if(pill) pill.textContent = "Last OK: - | Error: " + String(e || "refresh_failed");
+        showToast("Refresh failed", "err");
+        return;
+    }
 
     POLL_MS = (Number(j.poll_seconds) || 30) * 1000;
     nextLoadAt = Date.now() + POLL_MS;
@@ -940,6 +1151,15 @@ async function load(){
 
     document.getElementById("metaPill").textContent =
         "Last OK: " + (j.meta.last_ok || "-") + " | Error: " + (j.meta.last_error || "-");
+
+    // quick stats
+    const openCount = j.tickets.filter(t => t.status === "OPEN").length;
+    const progCount = j.tickets.filter(t => t.status === "IN_PROGRESS").length;
+    const waits = j.tickets.map(t => Number(t.wait_seconds)).filter(n => Number.isFinite(n) && n >= 0);
+    const avgMin = waits.length ? Math.round((waits.reduce((a,b)=>a+b,0)/waits.length)/60) : 0;
+    const maxMin = waits.length ? Math.floor((Math.max(...waits))/60) : 0;
+    document.getElementById("statsPill").textContent =
+        "Stats: OPEN " + openCount + " | IN PROGRESS " + progCount + " | Avg " + avgMin + "m | Max " + maxMin + "m";
 
     const authPill = document.getElementById("authPill");
     const tokenHint = document.getElementById("tokenHint");
@@ -1026,17 +1246,22 @@ const helpType = escapeHtml(t.help_type || "--");
             ? "flash"
             : "";
 
+        let tagsHtml = "";
+        if(t.status === "IN_PROGRESS"){
+            tagsHtml = `<div class="small" style="margin-top:6px">${buildTagHtml(t.ticket_id)}</div>` + buildCustomTagHtml(t.ticket_id);
+        }
+
         let btns = "";
         if(t.status === "OPEN"){
             btns += `<button class="primary" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','claim')">Claim</button>`;
             btns += `<button class="danger" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','no_show')">No-show</button>`;
             btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','resolve')">Resolve</button>`;
         }else if(t.status === "IN_PROGRESS"){
-            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Reopen</button>`;
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Back to OPEN</button>`;
             btns += `<button class="danger" onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','no_show')">No-show</button>`;
             btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','resolve')">Resolve</button>`;
         }else{
-            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Reopen</button>`;
+            btns += `<button onclick="handleAction(this,'${escapeHtml(t.ticket_id)}','reopen')">Back to OPEN</button>`;
         }
 
         const target = (t.status === "IN_PROGRESS") ? listProgress : listOpen;
@@ -1046,6 +1271,7 @@ const helpType = escapeHtml(t.help_type || "--");
                 <div>
                     <div><b>${escapeHtml(t.student)}</b> <span class="muted">(${status})</span></div>
                     <div class="muted">Wait: ${waitMin} min | Period: ${escapeHtml(t.period)}</div>
+                    ${tagsHtml}
                 </div>
                 <div class="btns">
                     ${btns}
@@ -1103,6 +1329,8 @@ async function suggestNext(){
     }
 
     const id = String(j.ticket.ticket_id || "");
+    lastSuggestedId = id;
+    showToast("Suggested: " + (j.ticket.student || "Student"), "ok");
     const card = document.getElementById("card_" + id.replace(/[^a-zA-Z0-9_]/g, "_"));
     if(card){
         card.classList.add("flash");
@@ -1116,6 +1344,21 @@ async function suggestNext(){
 async function doAction(ticketId, action){
     const token = getToken();
     const payload = { ticket_id: ticketId, action: action };
+
+    // Only attach tags/notes when resolving (keeps Claim fast + avoids slowing you down).
+    if(String(action).toLowerCase() === "resolve"){
+        const parts = [];
+        const sel = selectedTagsByTicket[ticketId];
+        if(sel && sel.size) parts.push(...Array.from(sel));
+
+        const custom = customTagsByTicket[ticketId];
+        if(custom && custom.size) parts.push(...Array.from(custom));
+
+        if(parts.length){
+            payload.tags = parts.join(", ");
+        }
+    }
+
     const headers = { "Content-Type":"application/json" };
     if(token) headers["X-Auth-Token"] = token;
 
@@ -1146,11 +1389,31 @@ async function doAction(ticketId, action){
     return true;
 }
 
-// reload when filters change
+// reload when filters change (debounced so typing doesn't spam the server)
 ["q","period","status","helpType","sortMode"].forEach(id => {
-    document.getElementById(id).addEventListener("input", () => load());
-    document.getElementById(id).addEventListener("change", () => load());
+    document.getElementById(id).addEventListener("input", () => requestLoad());
+    document.getElementById(id).addEventListener("change", () => requestLoad());
 });
+
+document.getElementById("pauseRefresh").addEventListener("change", () => {
+    // If unpausing, refresh immediately.
+    if(!document.getElementById("pauseRefresh").checked){
+        load();
+    }
+    scheduleTimers();
+});
+
+
+function onGlobalKey(e){
+    const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+    if(tag === "input" || tag === "select" || tag === "textarea") return;
+    const k = String(e.key||"").toLowerCase();
+    if(k === "n"){ suggestNext(); }
+    if(!lastSuggestedId) return;
+    if(k === "c"){ doAction(lastSuggestedId, "claim"); }
+    if(k === "r"){ doAction(lastSuggestedId, "resolve"); }
+}
+document.addEventListener("keydown", onGlobalKey);
 
 load();
 </script>
