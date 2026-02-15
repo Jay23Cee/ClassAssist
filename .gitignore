@@ -1,0 +1,28 @@
+# secrets (NEVER COMMIT)
+secrets/
+*.json
+
+# venv + local runtime files
+venv/
+data/
+logs/
+*.db
+
+# python cache
+__pycache__/
+*.pyc
+# python
+venv/
+__pycache__/
+*.pyc
+
+# secrets + config
+secrets/
+config.json
+*.json
+
+# runtime data
+logs/
+data/
+cache/
+*.db
