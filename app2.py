@@ -295,17 +295,16 @@ class SheetPoller:
     def _batch_update_cells(self, row_index_1based, col_map, updates_dict):
         """Write a batch of cell updates AND verify the write.
 
-        Returns (ok, msg). msg can be:
-          - OK
-          - NO_VALID_COLUMNS (nothing to write because columns missing)
-          - NOT_CONFIRMED (write may have happened, but we could not verify)
+        This prevents the UI from ever showing "Completed" unless the sheet reflects
+        the change. If verification cannot be performed (network/proxy issue), we
+        return a NOT_CONFIRMED error so the UI can be honest.
         """
         body = {"valueInputOption": "RAW", "data": []}
 
-        # Build batch update ranges (skip optional columns that don't exist)
-        updates = {k: v for k, v in (updates_dict or {}).items() if k in col_map}
-
-        for col_name, val in updates.items():
+        # Build batch update ranges
+        for col_name, val in updates_dict.items():
+            if col_name not in col_map:
+                continue  # optional column missing
             cell = f"{col_to_letter(col_map[col_name])}{row_index_1based}"
             body["data"].append({
                 "range": f"{self.sheet_name}!{cell}",
@@ -315,42 +314,46 @@ class SheetPoller:
         if not body["data"]:
             return False, "NO_VALID_COLUMNS"
 
-        # Serialize writes (protects against rapid repeat actions)
-        with self._write_lock:
-            # 1) Write
-            self._safe_execute(self._service.spreadsheets().values().batchUpdate(
+        # 1) Write
+        self._service.spreadsheets().values().batchUpdate(
+            spreadsheetId=self.sheet_id,
+            body=body
+        ).execute()
+
+        # 2) Verify (read row back and confirm updated cells match expected values)
+        try:
+            row_vals = self._service.spreadsheets().values().get(
                 spreadsheetId=self.sheet_id,
-                body=body
-            ))
+                range=f"{self.sheet_name}!A{row_index_1based}:ZZ{row_index_1based}"
+            ).execute().get("values", [])
 
-            # 2) Verify
-            try:
-                row_vals = self._safe_execute(self._service.spreadsheets().values().get(
-                    spreadsheetId=self.sheet_id,
-                    range=f"{self.sheet_name}!A{row_index_1based}:ZZ{row_index_1based}"
-                )).get("values", [])
-
-                if not row_vals:
-                    return False, "NOT_CONFIRMED"
-
-                row = row_vals[0]
-
-                def read_cell(col_name):
-                    idx_1 = col_map.get(col_name)
-                    if not idx_1:
-                        return ""
-                    i0 = idx_1 - 1
-                    return normalize(row[i0]) if i0 < len(row) else ""
-
-                for k, v in updates.items():
-                    if read_cell(k) != normalize(v):
-                        return False, "NOT_CONFIRMED"
-
-            except Exception:
-                logger.exception("Verify error")
+            if not row_vals:
                 return False, "NOT_CONFIRMED"
 
-        return True, "OK"
+            row = row_vals[0]
+
+            def read_cell(col_name):
+                idx_1 = col_map.get(col_name)
+                if not idx_1:
+                    return None
+                i0 = idx_1 - 1
+                if i0 >= len(row):
+                    return ""
+                return str(row[i0]).strip()
+
+            for col_name, expected in updates_dict.items():
+                if col_name not in col_map:
+                    continue
+                got = read_cell(col_name)
+                exp = str(expected).strip()
+                if got != exp:
+                    return False, f"VERIFY_MISMATCH_{col_name}"
+
+            return True, "OK"
+
+        except Exception:
+            logger.exception("Verify error")
+            return False, "NOT_CONFIRMED"
 
     def _update_cache_ticket(self, ticket_id, patch):
         with self._lock:
